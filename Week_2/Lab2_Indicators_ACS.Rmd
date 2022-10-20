@@ -71,7 +71,7 @@ palette5 <- c("#f0f9e8","#bae4bc","#7bccc4","#43a2ca","#0868ac")
 ```
 
 ```{r load_key, warning = FALSE, eval = FALSE}
-census_api_key("YOUR KEY GOES HERE", overwrite = TRUE)
+census_api_key("3c9540be1434ac4b38e6e55d60e8ee95909f2254", overwrite = TRUE)
 ```
 
 ### Use `get_acs()` to get 2016 ACS data
@@ -279,11 +279,14 @@ septaStops <-
       mutate(Line ="Broad_St") %>%
       dplyr::select(Station, Line)) %>%
   st_transform(st_crs(tracts16))  
+
+g(septaStops)
 ```
 
 Let's visualize it
 
 ```{r}
+g <- glimpse
 
 ggplot() + 
   geom_sf(data=st_union(tracts16)) +
