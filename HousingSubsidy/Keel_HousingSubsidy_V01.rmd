@@ -1,0 +1,136 @@
+---
+title: "Targeting A Housing Subsidy"
+author: "Ben Keel"
+date: "2022-11-04"
+output: html_document
+---
+
+# Motivation for Analysis
+
+Develop and interpret data visualizations that describe feature importance/correlation.
+
+# Important Features
+
+## Data Collecting
+
+```{r setup, include=FALSE}
+
+library(tidyverse)
+library(kableExtra)
+library(caret)
+library(knitr) 
+library(pscl)
+library(plotROC)
+library(pROC)
+library(lubridate)
+
+
+knitr::opts_chunk$set(echo = TRUE)
+
+subsidy <- read.csv("C:/Users/montb/OneDrive/Documents/MUSA_Fall/MUSA508/Public-Policy-Analytics-Landing-master/DATA/Chapter6/housingSubsidy.csv")
+
+
+```
+
+## Current Features
+
+Develop and interpret data visualizations that describe feature importance/correlation.
+
+```{r}
+
+
+
+
+```
+
+## Data Split + Modeling
+
+Split your data into a 65/35 training/test set.
+
+```{r }
+
+
+```
+
+# New Features
+
+```{r }
+
+
+```
+
+## List
+
+```{r }
+
+
+```
+
+## Regression Summary
+
+```{r }
+
+
+```
+
+## CV + Comparison
+
+```{r }
+
+
+```
+
+# Usefulness of New Model (ROC)
+Output an ROC curve for your new model and interpret it.
+
+```{r }
+
+
+```
+
+# Cost Benefit Analysis
+Develop a cost benefit analysis. 
+
+## Equations
+Write out the cost/benefit equation for each confusion metric.
+
+```{r }
+
+
+```
+
+## Table of Costs and Benefits
+Create the ‘Cost/Benefit Table’ as seen above.
+
+```{r }
+
+
+```
+
+## Confusion Metrics
+Plot the confusion metric outcomes for each Threshold.
+
+```{r }
+
+
+```
+
+## Total Revenuse and Count of Credits
+Create two small multiple plots that show Threshold as a function of Total_Revenue and Total_Count_of_Credits. Interpret this.
+
+```{r }
+
+
+```
+
+## Optimal Thresholds
+Create a table of the Total_Revenue and Total_Count_of_Credits allocated for 2 categories. 50%_Threshold and your Optimal_Threshold.
+
+
+```{r }
+
+
+```
+
+# Conclusion
+Conclude whether and why this model should or shouldn’t be put into production. What could make the model better? What would you do to ensure that the marketing materials resulted in a better response rate?

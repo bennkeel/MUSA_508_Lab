@@ -48,7 +48,7 @@ This uses the Socrata package for some data sets.
 
 Note where we bring in burglary data - you will want to vary this part to do your homework!
 
-```{r}
+```{r Data, warning = FALSE, message = FALSE,}
 policeDistricts <- 
   st_read("https://data.cityofchicago.org/api/geospatial/fthy-xz3r?method=export&format=GeoJSON") %>%
   st_transform('ESRI:102271') %>%
@@ -308,7 +308,9 @@ final_net.weights <- nb2listw(final_net.nb, style="W", zero.policy=TRUE)
 local_morans <- localmoran(final_net$Abandoned_Cars, final_net.weights, zero.policy=TRUE) %>% 
   as.data.frame()
 
-# join local Moran's I results to fishnet
+g(final_net.localMorans)
+
+S# join local Moran's I results to fishnet
 final_net.localMorans <- 
   cbind(local_morans, as.data.frame(final_net)) %>% 
   st_sf() %>%

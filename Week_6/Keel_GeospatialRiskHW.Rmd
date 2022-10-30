@@ -1,0 +1,777 @@
+---
+title: 'Predicting Illegal Firearm Posession with Spatial Considerations'
+author: "Ben Keel"
+date: "10/21/2022"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+    css:
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+Chicago and Illinois have some of the strictest gun laws in the country,
+but still experience gun violence at a similar rate to the rest of the
+county. Over half of these crimes involve guns that are from outside the
+state, from places like Indiana that now allow for permitless carrying
+of firearms. By contrast, illegal possession of a handgun has been a
+serious crime in Chicago, with the penalties being at a felony level.
+One may think that the state would Illinois State Police have only
+recently been active in confiscating guns from those who don't have a
+Firearm Ownership ID (FOID) registration. Though many like Cook County
+Sheriff Tom Dart have been "sounding the alarm" for the last decade with
+how many residents keep their guns past their registration expiry dates,
+attention only increased recently due to the high profile shooting in
+Aurora, IL by a resident whose gun permit had a long expired. Police are
+prioritizing this confiscation by those who "present a clear danger to
+others or themselves", a policy that is very open to personal bias and
+interpretation. With increased resources being put toward removing
+illegal firearms from Chicago, a model that could predict the risk of
+possession would be a helpful augment to State Police's prioritization
+process.
+
+#Set Up
+
+This process uses the packages listed in the code block. We need tools for data loading, mapping with vector maps and small units, regression cross-validation, and table styling.
+
+```{r setup, include=FALSE, warning = FALSE, message = FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning=FALSE)
+
+library(tidyverse)
+library(sf)
+library(RSocrata)
+library(viridis)
+library(spatstat)
+library(raster)
+library(spdep)
+library(FNN)
+library(grid)
+library(gridExtra)
+library(knitr)
+library(kableExtra)
+library(tidycensus)
+library(classInt)   # for KDE and ML risk class intervals
+# functions
+root.dir = "https://raw.githubusercontent.com/urbanSpatial/Public-Policy-Analytics-Landing/master/DATA/"
+source("https://raw.githubusercontent.com/urbanSpatial/Public-Policy-Analytics-Landing/master/functions.r")
+census_api_key("3c9540be1434ac4b38e6e55d60e8ee95909f2254", overwrite = TRUE)
+
+g <- glimpse
+# convinience to reduce length of function names.
+st_c    <- st_coordinates
+st_coid <- st_centroid
+
+```
+
+# Plotting illegal handgun possessions across Chicago
+
+## Where Illegal Handgun Possessions were recorded in 2018
+
+With the context we have about handgun possession, we can start looking at where the crimes are actively recorded. I use the socrata package to load in open data from Chicago's robust portal, along with boundaries that we can use to isolate information for Chicago from the rest of the state and into different parts.
+
+```{r Loading Data for Chicago, fig.width=6, fig.height=4, warning = FALSE, message = FALSE}
+policeDistricts <- 
+  st_read("https://data.cityofchicago.org/api/geospatial/fthy-xz3r?method=export&format=GeoJSON") %>%
+  st_transform('ESRI:102271') %>%
+  dplyr::select(District = dist_num)
+  
+policeBeats <- 
+  st_read("https://data.cityofchicago.org/api/geospatial/aerh-rz74?method=export&format=GeoJSON") %>%
+  st_transform('ESRI:102271') %>%
+  dplyr::select(District = beat_num)
+
+bothPoliceUnits <- rbind(mutate(policeDistricts, Legend = "Police Districts"), 
+                         mutate(policeBeats, Legend = "Police Beats"))
+
+handguns <- 
+  read.socrata("https://data.cityofchicago.org/Public-Safety/Crimes-2018/3i3m-jwuy") %>% 
+    filter(Primary.Type == "WEAPONS VIOLATION" & Description == "UNLAWFUL POSS OF HANDGUN") %>%
+    mutate(x = gsub("[()]", "", Location)) %>%
+    separate(x,into= c("Y","X"), sep=",") %>%
+    mutate(X = as.numeric(X),Y = as.numeric(Y)) %>% 
+    na.omit() %>%
+    st_as_sf(coords = c("X", "Y"), crs = 4326, agr = "constant")%>%
+    st_transform('ESRI:102271') %>% 
+    distinct()
+
+chicagoBoundary <- 
+  st_read(file.path(root.dir,"/Chapter5/chicagoBoundary.geojson")) %>%
+  st_transform('ESRI:102271') 
+
+# uses grid.arrange to organize independent plots
+grid.arrange(ncol=2,
+ggplot() + 
+  geom_sf(data = chicagoBoundary) +
+  geom_sf(data = handguns, colour="red", size=0.1, show.legend = "point") +
+  labs(title= "Handgun Violation, Chicago - 2018") +
+  mapTheme(title_size = 14),
+
+ggplot() + 
+  geom_sf(data = chicagoBoundary, fill = "grey40") +
+  stat_density2d(data = data.frame(st_coordinates(handguns)), 
+                 aes(X, Y, fill = ..level.., alpha = ..level..),
+                 size = 0.01, bins = 40, geom = 'polygon') +
+  scale_fill_viridis() +
+  scale_alpha(range = c(0.00, 0.35), guide = FALSE) +
+  labs(title = "Density of Handgun Possessions") +
+  mapTheme(title_size = 14) + theme(legend.position = "none"))
+```
+
+The point data here clusters in two areas, which some extended points between them. The lines and linear gaps of the dots implies that there are particular streets that the police may tend to observe, which could be leading to selection bias. The areas are also clustered in two majority non-White areas of Chicago as well, though the edges do bleed into majority White areas.
+
+## Creating a fishnet grid
+
+We can count the individual events per arbitrarily-defined units in an effort to reduce the selection bias of the police districts or beats. A fishnet grid accomplishes this task and provides a vizualization of local intensity. 
+
+```{r Fishnet Diagram, warning = FALSE, message = FALSE}
+fishnet <- 
+  st_make_grid(chicagoBoundary,
+               cellsize = 500, 
+               square = TRUE) %>%
+  .[chicagoBoundary] %>%            # fast way to select intersecting polygons
+  st_sf() %>%
+  mutate(uniqueID = 1:n())
+
+## add a value of 1 to each crime, sum them with aggregate
+crime_net <- 
+  dplyr::select(handguns) %>% 
+  mutate(countHandguns = 1) %>% 
+  aggregate(., fishnet, sum) %>%
+  mutate(countHandguns = replace_na(countHandguns, 0),
+         uniqueID = 1:n(),
+         cvID = sample(round(nrow(fishnet) / 24), 
+                       size=nrow(fishnet), replace = TRUE))
+
+ggplot() +
+  geom_sf(data = crime_net, aes(fill = countHandguns), color = NA) +
+  scale_fill_viridis() +
+  labs(title = "Count of Ill. Handgun Poss. for the fishnet") +
+  mapTheme()
+
+```
+
+# Determining predictors
+
+## Feature 1: Distance to Gun Crime
+
+Looking into studies of what may be correlated with illegal handgun possession, [one study](https://link.springer.com/article/10.1007/s10964-021-01464-6) surmised that exposure to gun-involved violence specifically was a reason that many individuals chose to carry guns, legally or illegally. I chose to summarize all gun-related violent crimes available in the Chicago crime database in one field to represent this risk factor. Reporting and selection bias could come into play here as well, but these may have less bias due to their higher profile than handgun possession.
+
+```{r Loading Variables, warning = FALSE, message = FALSE}
+
+#VARIABLE 1: Loading three types of crimes and their handgun-related descriptions
+gunCrime <- 
+  read.socrata("https://data.cityofchicago.org/Public-Safety/Crimes-2019/w98m-zvie") %>% 
+    filter((Primary.Type == "ASSAULT" |
+            Primary.Type == "BATTERY" |
+            Primary.Type == "ROBBERY") & 
+             (Description == "AGGRAVATED - HANDGUN" |
+              Description == "AGGRAVATED: HANDGUN" | 
+              Description == "AGGRAVATED DOMESTIC BATTERY - HANDGUN" | 
+              Description == "AGGRAVATED DOMESTIC BATTERY: HANDGUN" |
+              Description == "ARMED: HANDGUN" |
+              Description == "ARMED - HANDGUN" |
+              Description == "ATTEMPT: ARMED-HANDGUN")) %>%
+    mutate(x = gsub("[()]", "", Location)) %>%
+    separate(x,into= c("Y","X"), sep=",") %>%
+    mutate(X = as.numeric(X),Y = as.numeric(Y)) %>% 
+    na.omit() %>%
+    st_as_sf(coords = c("X", "Y"), crs = 4326, agr = "constant")%>%
+    st_transform('ESRI:102271') %>% 
+    mutate(Legend = "Gun_Crime")
+```
+
+## Feature 2: Rate of Young Adult Males 
+
+The study also noted that handgun ownership peaks in one's early 20's, and the majority of possession crimes are by male citizens. In order to get a continuous variable for comparison and to standardize it by area density, I changed the raw number to a rate of young males aged 18-24 per total males in the area.
+
+``` {r Feature 2, warning = FALSE, message = FALSE, results = 'hide'}
+#VARIABLE 2: Loading areas with highest rate of young males 18-24.
+#B01001C_008 20-24
+acs_vars <- c("B01001_002E", #Total Males
+              "B01001_007E", #Males 18-19
+              "B01001_008E", #Males 20
+              "B01001_009E", #Males 21
+              "B01001_010E") #Males 22-24
+
+acsTractsCHI.2019 <- get_acs(geography = "tract",
+                             year = 2019, 
+                             variables = acs_vars, 
+                             geometry = TRUE, 
+                             state = "IL", 
+                             county = "COOK", 
+                             output = "wide")%>%
+  rename(popMale = B01001_002E,
+         numM18_19 = B01001_007E,
+         numM20 = B01001_008E,
+         numM21 = B01001_009E,
+         numM22_24 = B01001_010E)%>%
+  mutate(popMaleYA = numM18_19 + numM20 + numM21 + numM22_24,
+         rateMaleYA = popMaleYA/popMale)%>%
+  na.omit()%>%
+  st_transform(st_crs(chicagoBoundary))
+
+tractsCHI <-
+  st_centroid(acsTractsCHI.2019)[chicagoBoundary,] %>%
+  st_drop_geometry() %>%
+  left_join(., dplyr::select(acsTractsCHI.2019, GEOID), by = "GEOID") %>%
+  st_sf()%>%
+  st_transform(st_crs(fishnet))
+
+## Neighborhoods to use in LOOCV in a bit
+neighborhoods <- 
+  st_read("https://raw.githubusercontent.com/blackmad/neighborhoods/master/chicago.geojson") %>%
+  st_transform(st_crs(fishnet)) 
+
+
+```
+
+## Loading features into fishnet diagrams
+
+By loading these features into the fishnet diagrams, I can compare the counts and rates of each small unit, and use those factors for predictions of each unit.
+
+```{r Variables to Fishnet Maps, warning = FALSE, message = FALSE}
+
+# FEATURE 1: Gun Crime Exposure
+vars_net <- gunCrime %>%
+  st_join(fishnet, join=st_within) %>%
+  st_drop_geometry() %>%
+  group_by(uniqueID, Legend) %>%
+  summarize(count = n()) %>%
+  left_join(fishnet, ., by = "uniqueID") %>%
+  spread(Legend, count, fill=0) %>%
+  dplyr::select(-`<NA>`) %>%
+  ungroup()
+
+## create NN from Gun Crime points
+vars_net <- vars_net %>%
+    mutate(Gun_Crime.nn = nn_function(st_c(st_coid(vars_net)), 
+                                           st_c(gunCrime),
+                                           k = 3))
+
+## Visualize the NN feature
+vars_net.long.nn <- 
+  dplyr::select(vars_net, ends_with(".nn")) %>%
+    gather(Variable, value, -geometry)
+
+ggplot() +
+      geom_sf(data = vars_net.long.nn, aes(fill=value), color=NA) +
+      scale_fill_viridis(name="NN Distance") +
+      labs(title="Gun Crimes NN Distance") +
+      mapTheme()
+
+# FEATURE 2: Rate of Young Adult Males
+vars_net <-
+  st_centroid(vars_net) %>%
+    st_join(dplyr::select(tractsCHI, rateMaleYA)) %>%
+      st_drop_geometry() %>%
+      left_join(dplyr::select(vars_net, geometry, uniqueID)) %>%
+      st_sf() %>%
+  na.omit()
+
+#combining dependent and independent variables
+final_net <-
+  left_join(crime_net, st_drop_geometry(vars_net), by="uniqueID") 
+
+#Adding neighborhoods and police districts
+final_net <-
+  st_centroid(final_net) %>%
+    st_join(dplyr::select(neighborhoods, name), by = "uniqueID") %>%
+    st_join(dplyr::select(policeDistricts, District), by = "uniqueID") %>%
+      st_drop_geometry() %>%
+      left_join(dplyr::select(final_net, geometry, uniqueID)) %>%
+      st_sf() %>%
+  na.omit()
+
+# COMPILING to long format for visualization purposes
+final_net.long <- final_net %>%
+  dplyr::select(Gun_Crime.nn, rateMaleYA)%>%
+  gather(Variable, Value, -geometry)
+
+
+vars <- unique(final_net.long$Variable)
+varList <- list()
+
+for(i in vars){
+  varList[[i]] <- 
+    ggplot() +
+      geom_sf(data = filter(final_net.long, Variable == i), 
+              aes(fill = Value), colour=NA) +
+      scale_fill_viridis(name="") +
+      labs(title=i) +
+      mapTheme(title_size = 14) + theme(legend.position="bottom")}
+
+do.call(grid.arrange,c(varList, ncol = 2, top = "Risk Factors by Fishnet"))
+
+
+```
+
+
+## Local Moran's I for fishnet grid cells
+
+These crimes are heavily clustered, as evidenced by previous maps. We hope to account for this phenomenon, called spatial autocorrelation, by incorporating the relative spatial likelihood of neighbors in our analysis. We do this through the local Moran's I functions, which give us a relative number of likelihood of the crime occuring based on the location of the unit. This factor helps avoid stuff. 
+
+```{r MoransI, warning = FALSE, message = FALSE}
+
+## {spdep} to make polygon to neighborhoods... 
+final_net.nb <- poly2nb(as_Spatial(final_net), queen=TRUE)
+
+## ... and neighborhoods to list of weigths
+final_net.weights <- nb2listw(final_net.nb, style="W", zero.policy=TRUE)
+
+## see ?localmoran
+local_morans <- localmoran(final_net$countHandguns, final_net.weights, zero.policy=TRUE) %>% 
+  as.data.frame()
+
+final_net <- final_net %>% 
+  mutate(handgun.isSig = 
+           ifelse(local_morans[,5] <= 0.001, 1, 0)) %>%
+  mutate(handgun.isSig.dist = 
+           nn_function(st_c(st_coid(final_net)),
+                       st_c(st_coid(filter(final_net, 
+                                           handgun.isSig == 1))), 
+                       k = 1))
+
+# join local Moran's I results to fishnet
+final_net.localMorans <- 
+  cbind(local_morans, as.data.frame(final_net)) %>% 
+  st_sf() %>%
+  dplyr::select(Handgun_Count = countHandguns, 
+                Local_Morans_I = Ii, 
+                P_Value = `Pr(z != E(Ii))`) %>%
+  mutate(Significant_Hotspots = ifelse(P_Value <= 0.001, 1, 0)) %>%
+  gather(Variable, Value, -geometry)
+
+
+## This is just for plotting
+vars <- unique(final_net.localMorans$Variable)
+varList <- list()
+
+for(i in vars){
+  varList[[i]] <- 
+    ggplot() +
+      geom_sf(data = filter(final_net.localMorans, Variable == i), 
+              aes(fill = Value), colour=NA) +
+      scale_fill_viridis(name="") +
+      labs(title=i) +
+      mapTheme(title_size = 14) + theme(legend.position="bottom")}
+
+do.call(grid.arrange,c(varList, ncol = 4, top = "Local Morans I statistics, Weapons Violation (Handgun)"))
+  
+```
+
+# Correlation
+
+See below the relationship between each of our current features and the occurance of unlawful handgun possession in each unit. Young adult population is not very significant, though some outliers may be affecting the correlation calculation. Gun crime and distance to nearest 5 gun crimes (gun_crime.nn) do have stronger correlations with handgun possession charges.
+
+``` {r Correlation Graphs, warning = FALSE, message = FALSE}
+
+
+correlation.long <-
+  st_drop_geometry(final_net) %>%
+    dplyr::select(-uniqueID, -cvID, -name, -District) %>%
+    gather(Variable, Value, -countHandguns)
+
+correlation.cor <-
+  correlation.long %>%
+    group_by(Variable) %>%
+    summarize(correlation = cor(Value, countHandguns, use = "complete.obs"))
+    
+ggplot(correlation.long, aes(Value, countHandguns)) +
+  geom_point(size = 0.1) +
+  geom_text(data = correlation.cor, aes(label = paste("r =", round(correlation, 2))),
+            x=-Inf, y=Inf, vjust = 1.5, hjust = -.1) +
+  geom_smooth(method = "lm", se = FALSE, colour = "black") +
+  facet_wrap(~Variable, ncol = 2, scales = "free") +
+  labs(title = "Illegal Handguns as a function of risk factors") +
+  plotTheme()
+
+```
+
+# Handgun Violation Distribution
+
+The amount of units based on the number of handgun possession crimes in that area.
+
+```{r Dependent Variable Histogram, warning = FALSE, message = FALSE}
+
+ggplot(final_net, aes(countHandguns)) + 
+    geom_histogram(bins = 15, colour="black", fill = "#FDE725FF") +
+    labs(title="Distribution of Handgun Violations", subtitle = "Weapons Violation: Illegal Handgun Possession, Chicago, IL",
+         x="Illegal Handgun Posessions", y="Fishnet Units") +
+    plotTheme()
+
+```
+
+
+## Modeling and CV
+
+We start with the risk factor and spatial risk factor analysis through K-Fold Cross Validation, measuring prediction accuracy by leaving particular subsets of the information out of training data, then predicting the number of crimes in that area. We account for neighborhood effects in the second type of cross validation, using Leave-One-Group-Out (LOGO) cross validation. 
+
+```{r Regression and CV, results='hide', warning = FALSE, message = FALSE}
+
+# View(crossValidate)
+
+## define the variables we want
+
+reg.vars <- c("Gun_Crime", "rateMaleYA")
+reg.ss.vars <- c("Gun_Crime", "handgun.isSig","handgun.isSig.dist", "rateMaleYA")
+
+## RUN REGRESSIONS
+
+### K Fold Standard
+reg.cv <- crossValidate(
+  dataset = final_net,
+  id = "cvID",                           
+  dependentVariable = "countHandguns",
+  indVariables = reg.vars) %>%
+    dplyr::select(cvID = cvID, countHandguns, Prediction, geometry)
+
+### K Fold Spatial
+reg.ss.cv <- crossValidate(
+  dataset = final_net,
+  id = "cvID",                           
+  dependentVariable = "countHandguns",
+  indVariables = reg.ss.vars) %>%
+    dplyr::select(cvID = cvID, countHandguns, Prediction, geometry)
+
+### LOGO CV
+reg.spatialCV <- crossValidate(
+  dataset = final_net,
+  id = "name",                           
+  dependentVariable = "countHandguns",
+  indVariables = reg.vars) %>%
+    dplyr::select(cvID = name, countHandguns, Prediction, geometry)
+
+## LOGO CV SPATIAL
+
+reg.ss.spatialCV <- crossValidate(
+  dataset = final_net,
+  id = "name",                           
+  dependentVariable = "countHandguns",
+  indVariables = reg.ss.vars) %>%
+    dplyr::select(cvID = name, countHandguns, Prediction, geometry)
+
+```
+## Errors of Each Regression Type
+
+See below the errors occuring in the K-fold cross validation. They appear to be scattered throughout the map.
+
+```{r Errors KFOLD, warning = FALSE, message = FALSE}
+# calculate errors by regression type
+error_reg.cv <- 
+  reg.cv %>%
+    group_by(cvID) %>% 
+    summarize(Mean_Error = mean(Prediction - countHandguns, na.rm = T),
+              MAE = mean(abs(Mean_Error), na.rm = T),
+              SD_MAE = mean(abs(Mean_Error), na.rm = T),
+              Regression = "K-FOLD: Risk Factors Only") %>%
+  ungroup()
+
+error_reg.ss.cv <- 
+  reg.ss.cv %>%
+    group_by(cvID) %>% 
+    summarize(Mean_Error = mean(Prediction - countHandguns, na.rm = T),
+              MAE = mean(abs(Mean_Error), na.rm = T),
+              SD_MAE = mean(abs(Mean_Error), na.rm = T),
+              Regression = "K-FOLD: Spatial Process") %>%
+  ungroup()
+
+# join local Moran's I results to fishnet
+reg.cv.Errors<- 
+  rbind(error_reg.cv, error_reg.ss.cv) %>% 
+  st_sf() %>%
+  dplyr::select(MAE,
+                Regression) %>%
+  gather(Variable, Value, -geometry, -Regression)
+
+## This is just for plotting
+vars <- unique(reg.cv.Errors$Regression)
+varList <- list()
+
+for(i in vars){
+  varList[[i]] <- 
+    ggplot() +
+      geom_sf(data = reg.cv.Errors, 
+              aes(fill = Value), colour=NA) +
+      scale_fill_viridis(name="") +
+      labs(title=i) +
+      mapTheme(title_size = 14) + theme(legend.position="bottom")}
+
+do.call(grid.arrange,c(varList, ncol = 2, top = "K-Fold CV MAE by Process, Weapons Violation (Handgun)"))
+
+```
+
+Here are the errors for the neighborhood effects cross validation, showing three to four neighborhood areas of errors across the central and Southern parts of Chicago.
+
+``` {r Errors LOGOCV, warning = FALSE, message = FALSE}
+error_reg.spatialCV <- 
+  reg.spatialCV %>%
+    group_by(cvID) %>% 
+    summarize(Mean_Error = mean(Prediction - countHandguns, na.rm = T),
+              MAE = mean(abs(Mean_Error), na.rm = T),
+              SD_MAE = mean(abs(Mean_Error), na.rm = T),
+              Regression = "LOGO-CV: Risk Factors Only") %>%
+  ungroup()
+
+error_reg.ss.spatialCV <- 
+  reg.ss.spatialCV %>%
+    group_by(cvID) %>% 
+    summarize(Mean_Error = mean(Prediction - countHandguns, na.rm = T),
+              MAE = mean(abs(Mean_Error), na.rm = T),
+              SD_MAE = mean(abs(Mean_Error), na.rm = T),
+              Regression = "LOGO-CV: Spatial Process") %>%
+  ungroup()
+
+
+reg.SpatialCV.Errors <- 
+  rbind(error_reg.spatialCV, error_reg.ss.spatialCV) %>% 
+  st_sf() %>%
+  dplyr::select(MAE,
+                Regression) %>%
+  gather(Variable, Value, -geometry, -Regression)
+
+## This is just for plotting
+vars <- unique(reg.SpatialCV.Errors$Regression)
+varList <- list()
+
+for(i in vars){
+  varList[[i]] <- 
+    ggplot() +
+      geom_sf(data = reg.SpatialCV.Errors, 
+              aes(fill = Value), colour=NA) +
+      scale_fill_viridis(name="") +
+      labs(title=i) +
+      mapTheme(title_size = 14) + theme(legend.position="bottom")}
+
+do.call(grid.arrange,c(varList, ncol = 2, top = "LOGO-CV MAE by Process, Weapons Violation (Handgun)"))
+
+
+```
+
+## MAE Summary Table
+
+The table below illustrates each model's errors more effectively, as well as the reduction of errors that happen when accounting for the spatial process, or reducing spatial autocorrelation errors with the Moran's I values.
+
+```{r MAE Summary Table, warning = FALSE, message = FALSE}
+
+#Kable table for summary of Mean Absolute Error and MAPE(%)
+allErrors <- rbind(st_drop_geometry(error_reg.cv), 
+                    st_drop_geometry(error_reg.ss.cv), 
+                    st_drop_geometry(error_reg.spatialCV), 
+                    st_drop_geometry(error_reg.ss.spatialCV))
+  
+allErrors%>%
+  dplyr::select(MAE, SD_MAE, Regression)%>%
+  group_by(Regression)%>%
+  summarize(MeanAbsoluteError = mean(MAE, na.rm=TRUE),
+            StdDeviationMAE = mean(SD_MAE, na.rm=TRUE))%>%
+  kable(
+    caption = "<strong>Average Regression Errors by Value and Percent</strong>",
+    escape= FALSE,
+    format="html",
+    row.names = FALSE,
+    align="l")%>%
+  kable_styling()
+
+```
+
+# Generalizing Across Different Groups
+
+Placing each census tract into a category of race majority and comparing our model's predictions between the two categories can help illustrate whether our model is generalizable across an important metric that has affected enforcement levels in the past.
+
+```{r Race Context Map Loading, results = 'hide', warning = FALSE, message = FALSE}
+
+tracts18 <- 
+  get_acs(geography = "tract", variables = c("B01001_001E","B01001A_001E"), 
+          year = 2018, state=17, county=031, geometry=T) %>%
+  st_transform('ESRI:102271')  %>% 
+  dplyr::select(variable, estimate, GEOID) %>%
+  spread(variable, estimate) %>%
+  rename(TotalPop = B01001_001,
+         NumberWhites = B01001A_001) %>%
+  mutate(percentWhite = NumberWhites / TotalPop,
+         raceContext = ifelse(percentWhite > .5, "Majority_White", "Majority_Non_White")) %>%
+  .[neighborhoods,]
+
+```
+
+The K-fold measurement has very low errors between the two areas, but the neighborhood effects model, which hopes to reduce spatial differences, shows that our model underpredicts non-White area crime occurences and overpredicts White area crime more signifigantly. This difference is only by one or two accounts, but it does signal that our model could be more generalizable.
+
+
+``` {r Race Context Table, warning = FALSE, message = FALSE}
+
+error1 <- error_reg.cv %>% 
+  filter(str_detect(Regression, "K-FOLD")) %>%
+    st_centroid() %>%
+    st_join(tracts18) %>%
+    na.omit() %>%
+      st_drop_geometry() %>%
+      group_by(Regression, raceContext) %>%
+      summarize(mean.Error = mean(Mean_Error, na.rm = T)) %>%
+      spread(raceContext, mean.Error) 
+
+error2 <- error_reg.ss.cv %>% 
+  filter(str_detect(Regression, "K-FOLD")) %>%
+    st_centroid() %>%
+    st_join(tracts18) %>%
+    na.omit() %>%
+      st_drop_geometry() %>%
+      group_by(Regression, raceContext) %>%
+      summarize(mean.Error = mean(Mean_Error, na.rm = T)) %>%
+      spread(raceContext, mean.Error)
+
+error3 <- error_reg.spatialCV %>% 
+  filter(str_detect(Regression, "LOGO")) %>%
+    st_centroid() %>%
+    st_join(tracts18) %>%
+    na.omit() %>%
+      st_drop_geometry() %>%
+      group_by(Regression, raceContext) %>%
+      summarize(mean.Error = mean(Mean_Error, na.rm = T)) %>%
+      spread(raceContext, mean.Error)
+
+error4 <- error_reg.ss.spatialCV %>% 
+  filter(str_detect(Regression, "LOGO")) %>%
+    st_centroid() %>%
+    st_join(tracts18) %>%
+    na.omit() %>%
+      st_drop_geometry() %>%
+      group_by(Regression, raceContext) %>%
+      summarize(mean.Error = mean(Mean_Error, na.rm = T)) %>%
+      spread(raceContext, mean.Error)
+
+rbind(error1, error2, error3, error4)%>%
+  kable(
+    caption = "<strong>Average Regression Errors by Race Context</strong>",
+    escape= FALSE,
+    format="html",
+    row.names = FALSE,
+    align="l")%>%
+  kable_styling()
+
+
+```
+
+# Density vs predictions
+
+## Get 2018 crime data
+
+Let's see how our model performed relative to KD on the following year's
+data.
+
+These two maps show 2018's data or predictions underneath and 2019's actual crimes on top in red dots.
+
+```{r NextYearData, warning = FALSE, message = FALSE}
+handguns19 <- 
+  read.socrata("https://data.cityofchicago.org/Public-Safety/Crimes-2019/w98m-zvie") %>% 
+filter(Primary.Type == "WEAPONS VIOLATION" & Description == "UNLAWFUL POSS OF HANDGUN") %>%
+  mutate(x = gsub("[()]", "", Location)) %>%
+  separate(x,into= c("Y","X"), sep=",") %>%
+  mutate(X = as.numeric(X),
+         Y = as.numeric(Y)) %>% 
+  na.omit %>%
+  st_as_sf(coords = c("X", "Y"), crs = 4326, agr = "constant") %>%
+  st_transform('ESRI:102271') %>% 
+  distinct() %>%
+  .[fishnet,]
+```
+
+Our predictions (right) are much more focused in their areas, and definitely do not cover the areas where unlawful handgun posession actually occured. This may be due to selection bias, but the difference in magnitude between these maps shows an underprediction on the part of the model.
+
+```{r Kernel Density, warning = FALSE, message = FALSE}
+
+# demo of kernel width
+hand_ppp <- as.ppp(st_coordinates(handguns), W = st_bbox(final_net))
+hand_KD.1000 <- spatstat.core::density.ppp(hand_ppp, 1000)
+hand_KD.1500 <- spatstat.core::density.ppp(hand_ppp, 1500)
+hand_KD.2000 <- spatstat.core::density.ppp(hand_ppp, 2000)
+hand_KD.df <- rbind(
+  mutate(data.frame(rasterToPoints(mask(raster(hand_KD.1000), as(neighborhoods, 'Spatial')))), Legend = "1000 Ft."),
+  mutate(data.frame(rasterToPoints(mask(raster(hand_KD.1500), as(neighborhoods, 'Spatial')))), Legend = "1500 Ft."),
+  mutate(data.frame(rasterToPoints(mask(raster(hand_KD.2000), as(neighborhoods, 'Spatial')))), Legend = "2000 Ft.")) 
+
+hand_KD.df$Legend <- factor(hand_KD.df$Legend, levels = c("1000 Ft.", "1500 Ft.", "2000 Ft."))
+
+hand_KDE_sum <- as.data.frame(hand_KD.1000) %>%
+  st_as_sf(coords = c("x", "y"), crs = st_crs(final_net)) %>%
+  aggregate(., final_net, mean) 
+kde_breaks <- classIntervals(hand_KDE_sum$value, 
+                             n = 5, "fisher")
+hand_KDE_sf <- hand_KDE_sum %>%
+  mutate(label = "Kernel Density",
+         Risk_Category = classInt::findCols(kde_breaks),
+         Risk_Category = case_when(
+           Risk_Category == 5 ~ "5th",
+           Risk_Category == 4 ~ "4th",
+           Risk_Category == 3 ~ "3rd",
+           Risk_Category == 2 ~ "2nd",
+           Risk_Category == 1 ~ "1st")) %>%
+  cbind(
+    aggregate(
+      dplyr::select(handguns19) %>% mutate(handCount = 1), ., sum) %>%
+    mutate(handCount = replace_na(handCount, 0))) %>%
+  dplyr::select(label, Risk_Category, handCount)
+
+ml_breaks <- classIntervals(reg.ss.spatialCV$Prediction, 
+                             n = 5, "fisher")
+hand_risk_sf <-
+  reg.ss.spatialCV %>%
+  mutate(label = "Risk Predictions",
+         Risk_Category =classInt::findCols(ml_breaks),
+         Risk_Category = case_when(
+           Risk_Category == 5 ~ "5th",
+           Risk_Category == 4 ~ "4th",
+           Risk_Category == 3 ~ "3rd",
+           Risk_Category == 2 ~ "2nd",
+           Risk_Category == 1 ~ "1st")) %>%
+  cbind(
+    aggregate(
+      dplyr::select(handguns19) %>% mutate(handCount = 1), ., sum) %>%
+      mutate(handCount = replace_na(handCount, 0))) %>%
+  dplyr::select(label,Risk_Category, handCount)
+
+rbind(hand_KDE_sf, hand_risk_sf) %>%
+  na.omit() %>%
+  gather(Variable, Value, -label, -Risk_Category, -geometry) %>%
+  ggplot() +
+    geom_sf(aes(fill = Risk_Category), colour = NA) +
+    geom_sf(data = sample_n(handguns19, 3000), size = .25, colour = "red", alpha = 0.1) +
+    facet_wrap(~label, ) +
+    scale_fill_viridis(discrete = TRUE) +
+    labs(title="Comparison of Kernel Density and Risk Predictions",
+         subtitle="2018 Handgun Violation Predictions; 2019 Handgun Violations") +
+    mapTheme(title_size = 14)
+```
+
+## Bar Graph
+
+This bar graph, comparing the two classifications of risk (5 is highest, also shows that my model predicts very few areas of high crime. This is not correct, as the maps show above.
+
+```{r Density vs Predictions Comparison, warning = FALSE, message = FALSE}
+rbind(hand_KDE_sf, hand_risk_sf) %>%
+  st_drop_geometry() %>%
+  na.omit() %>%
+  gather(Variable, Value, -label, -Risk_Category) %>%
+  group_by(label, Risk_Category) %>%
+  summarize(countHandguns = sum(Value)) %>%
+  ungroup() %>%
+  group_by(label) %>%
+  mutate(Pcnt_of_test_set_crimes = countHandguns / sum(countHandguns)) %>%
+    ggplot(aes(Risk_Category,Pcnt_of_test_set_crimes)) +
+      geom_bar(aes(fill=label), position="dodge", stat="identity") +
+      scale_fill_viridis(discrete = TRUE, name = "Model") +
+      labs(title = "Risk prediction vs. Kernel density, 2018 Handgun Violations",
+           y = "% of Test Set Handgun Violations (per model)",
+           x = "Risk Category") +
+  theme_bw() +
+      theme(axis.text.x = element_text(angle = 45, vjust = 0.5))
+```
+
+# Discussion and Conclusion
+
+I would not recommend this particular model be used over the density maps approach. The objective with these limited variables was to examine whether reducing problems with baked-in selection bias and having just a couple variables could still give a comparable result, hopefully indicating some more latent risks. However, it's obvious that the model needs more information, as predicting just by the strongest conclusions of other studies has led to a severe under-prediction in areas where the handgun possession violations tends to cluster. This result is illustrated clearly in the comparison of density vs risk prediction maps, where the expanse of red dots aren't covered by the few hot spots that the model predicted, and there are large areas of observations to the North and South that have no indication form the model that this crime would occur there. Additional features that could possibly help may be related to the "lack of future outlook" risk factor detailed in some studies, which could be represented by density of those with a higher education, graduation rates, employment stats, relative income in an area, or other factors that give a sense that indicate increased economic or social opportunity.
+
+That said, the spatial features helped each type of model perform better, illustrated through the MAE differences when accounting for spatial weights. The K-fold CV's probably performed better because of the severe under-prediction of events, which made for more drastic differences between the predictions in a neighborhood in the LOGO CV and the actual observations. Fewer observations per unit in the K-fold CV would reduce the mean absolute errors in that situation. This evidence indicates that spatial weights need to be included in future aspects of the model, and with more information, it could prove useful over time.
+
