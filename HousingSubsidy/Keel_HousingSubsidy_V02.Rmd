@@ -1,5 +1,5 @@
 ---
-title: "Targeting A Housing Subsidy"
+title: "Marketing Campaign for a Housing Subsidy"
 author: "Ben Keel"
 date: "2022-11-04"
 output:
@@ -9,15 +9,19 @@ output:
     code_folding: hide
 ---
 
-# Motivation for Analysis
+# Who Would Take a Subsidy?
 
-Develop and interpret data visualizations that describe feature importance/correlation.
+
+
+
 
 # Important Features
 
 ## Data Collecting
 
-```{r setup, include=FALSE}
+First step is to import the data source and libraries to be used for analysis.
+
+```{r setup, include=FALSE, warning = FALSE, message = FALSE}
 
 library(tidyverse)
 library(kableExtra)
@@ -46,16 +50,15 @@ g <- glimpse
 
 subsidy <- read.csv("D:\\MUSAFall\\MUSA_508\\Public-Policy-Analytics-Landing-master\\DATA\\Chapter6\\housingSubsidy.csv")
 
-g(subsidy)
-
+subsidy$y <- factor(subsidy$y, levels = c("yes", "no"))
 
 ```
 
 ## Current Features
 
-Develop and interpret data visualizations that describe feature importance/correlation.
+Below are collections of graphs to be used for feature selection when building a more effective model. Our data has results from previous campaigns that will enable a forecast of future participation in the housing subsidy. A "yes" here means that the person chose to participate, and may or may not have completed the application completely and received a subsidy. 
 
-```{r DV Continuous likelihood}
+```{r DV Continuous likelihood, warning = FALSE, message = FALSE}
 
 subsidy %>%
   dplyr::select(y, age, spent_on_repairs, inflation_rate, unemploy_rate, previous, campaign) %>%
@@ -64,14 +67,17 @@ subsidy %>%
       geom_bar(position = "dodge", stat = "summary", fun = "mean") + 
       facet_wrap(~Variable, scales = "free") +
       scale_fill_manual(values = palette2) +
-      labs(x="Click", y="Value", 
-           title = "Feature associations with the likelihood of click",
+      labs(x="Participated?", y="Value", 
+           title = "Feature associations with the likelihood of Participation",
            subtitle = "(continous outcomes)") +
       theme(legend.position = "none")
 
 
 ```
 
+Age appears to have little bearing, at least when displayed in this form, same with the amount that a household spent on repairs previously. More useful indicators seem to be The current unemployment rate and whether or not the household had been involved with a previous campaign. 
+
+However, plotting age across a continuous stream illustrates some different patterns of participation at different ranges of age. Similar with the "spent_on_repairs" vector, these features could be adjusted for more relevancy in the model. Other fields remain difficult to parse, like the consumer confidence and price indices. 
 ```{r DV Continuous Distribution}
 
 subsidy %>%
@@ -81,28 +87,31 @@ subsidy %>%
     geom_density(aes(value, color=y), fill = "transparent") + 
     facet_wrap(~Variable, scales = "free") +
     scale_fill_manual(values = palette2) +
-    labs(title = "Feature distributions click vs. no click",
-         subtitle = "(continous outcomes)")
+    labs(title = "Feature Distributions of Participation",
+         subtitle = "Continous Outcomes",
+         legend.title= "Result")
 
 
 ```
 
-```{r DV Categorical Features: Personal Info}
+The bar charts below show categorical variables from the data set, both in the citizens's rates of participation and the raw counts for each category. When trying to find the right indicators of whether someone participated in the program or not, certain categories appear to be very relevant when their ratio of yes's to no's. However, double checking the raw counts reveal that some of the categories with the highest ratio of yes's to no's may not have a relatively sufficient number to compare to other categories. The job numbers, with its large variation between the raw counts of citizens marketed to, are a good example here. If their rate may warped by the low count of citizens in that cross-tab, then it serves as a less effective indicator than we may hope for, and we can ignore it when engineering features.
+
+```{r DV Categorical Features: Personal Info, warning = FALSE, message = FALSE}
 
 
 #Rate Graphs
 subsidy %>%
-    dplyr::select(y, job, marital, education, taxLien, mortgage, taxbill_in_phl) %>%
+    dplyr::select(y, job, marital, education, mortgage, taxbill_in_phl) %>%
     gather(Variable, value, -y) %>%
     count(Variable, value, y) %>%
     group_by(Variable) %>%
-      mutate(rate = n/lag(n))%>%
-    filter(y=="yes")%>%
+      mutate(rate = lag(n)/n)%>%
+    filter(y == "no" & value != "illiterate")%>%
       ggplot(., aes(value, rate)) +   
         geom_bar(position = "dodge", stat="identity") +
         facet_wrap(~Variable, scales="free") +
-        labs(x="Category", y="Percentage of 'Yes' Results",
-             title = "Feature associations with the likelihood of click",
+        labs(x="Category", y="Ratio of 'Yes' to 'No'",
+             title = "Feature Associations with the Likelihood of Participation",
              subtitle = "Categorical features") +
         theme(axis.text.x = element_text(angle = 45, hjust = 1))
 
@@ -116,41 +125,43 @@ subsidy %>%
         geom_bar(position = "dodge", stat="identity") +
         facet_wrap(~Variable, scales="free") +
         scale_fill_manual(values = palette2) +
-        labs(x="Click", y="Value",
-             title = "Feature associations with the likelihood of click",
+        labs(x="Category", y="Value",
+             title = "Feature Associations with Counts of Participation",
              subtitle = "Categorical features") +
         theme(axis.text.x = element_text(angle = 45, hjust = 1))
 
 ```
 
-```{r DV Categorical Features: Campaign Contact Info}
+The same conclusion can be drawn from the "months" data illustrated below. December has a small amount of data recorded, yet it is up with March as one of the best times to contact someone to increase likelihood of participation. These differences are helpful when changing rates. 
+
+```{r DV Categorical Features: Campaign Contact Info, warning = FALSE, message = FALSE}
 
 #Rate Graphs
 subsidy %>%
     dplyr::select(y, contact, pdays, month, day_of_week, poutcome) %>%
     gather(Variable, value, -y) %>%
     count(Variable, value, y)%>%
-  mutate(rate = n/lag(n))%>%
-    filter(y=="yes")%>%
+  mutate(rate = lag(n)/n)%>%
+    filter(y=="no")%>%
       ggplot(., aes(value, rate)) +   
         geom_bar(position = "dodge", stat="identity") +
         facet_wrap(~Variable, scales="free") +
-        labs(x="Category", y="Percentage of 'Yes' Results",
-             title = "Feature associations with the likelihood of click",
+        labs(x="Category", y="Ratio of 'Yes' to 'No'",
+             title = "Feature associations with the likelihood of Participation",
              subtitle = "Categorical features") +
         theme(axis.text.x = element_text(angle = 45, hjust = 1))
 
 #Quantity Graphs
 subsidy %>%
-    dplyr::select(y, contact, pdays, month, day_of_week, poutcome) %>%
+    dplyr::select(y, contact, month, day_of_week, poutcome) %>%
     gather(Variable, value, -y) %>%
     count(Variable, value, y) %>%
       ggplot(., aes(value, n, fill = y)) +   
         geom_bar(position = "dodge", stat="identity") +
         facet_wrap(~Variable, scales="free") +
         scale_fill_manual(values = palette2) +
-        labs(x="Click", y="Value",
-             title = "Feature associations with the likelihood of click",
+        labs(x="Category", y="Value",
+             title = "Feature Associations with Counts of Participation",
              subtitle = "Categorical features") +
         theme(axis.text.x = element_text(angle = 45, hjust = 1))
 
@@ -159,9 +170,9 @@ subsidy %>%
 
 ## Data Split + Modeling
 
-Split your data into a 65/35 training/test set.
+To start with the modeling, we split the base data set into 65% and 35% parts, then throw every variable into the model to get a baseline read on how the logistic regression will interpret this data.
 
-```{r }
+```{r Data Partition and "Kitchen Sink" Regression, warning = FALSE, message = FALSE}
 
 set.seed(999)
 trainIndex <- createDataPartition(subsidy$y, p = .65,
@@ -179,7 +190,11 @@ summary(subsidyModel)
 
 ```
 
-```{r}
+Many of the features do not appear to be significant, signaling that we can do some cleaning of the features to avoid risking multi-collinearity, overlapping the effects that different features have on the prediction.
+
+Looking at the McFadden R-Squared Value below, one would hope to move this value closer to 1 when engineering more relevant features. 
+
+```{r Standard Reg McFadden R-squared, warning = FALSE, message = FALSE}
 regSubsidySummary <- 
   tidy(pR2(subsidyModel))%>%
   mutate(Regression = "Kitchen Sink")
@@ -198,26 +213,17 @@ regSubsidySummary%>%
 
 ```
 
-# New Features
+## New Features
 
-The Sensitivity (True Positive Rate) for a model with all the features is very low. Engineer new features that significantly increase the Sensitivity.
+Four new features were added or attempted for this sake, to increase the predictive relevancy of logistic regression and account for variance with tangible terms. First, the "spent_on_repairs" term was one of the terms with a lower p-value and a large gap at the tail end of its data. By focusing in on the variance above 4800, it hopefully makes the value better at forecasting participation chances. 
 
-```{r }
+Age showed a similar variance in patterns across space, so I categorized it based on the areas with the largest or smallest gaps between yes and no in the continuous variable plots.
 
+Employed numbers, grouping students, unemployed citizens, and retirees in a group, seemed to create a useful difference between categories.
 
-g(subsidyRevised)
-ggplot(subsidy, aes(spent_on_repairs)) + 
-    geom_histogram(bins = 15, colour="black", fill = "#FDE725FF")
+Months was a variable with high significance, per the regression summary, but the many categories left many individual variables with similar high p-values and low significance. Grouping these months by their relative activity and high ratio of yes's to no's focused the variable into more relevant terms or "high", "med", and "low" collection volume and relative performance.
 
-
-
-```
-
-## List
-
-Interpret your new features in one paragraph.
-
-```{r }
+```{r Feature Engineering, warning = FALSE, message = FALSE}
 #Engineer new features
 ##Summarize job as currently working vs not working. 
 subsidyRevised <- 
@@ -226,43 +232,61 @@ subsidyRevised <-
          Employed = ifelse(job == "unknown", "unknown", 
                     ifelse (job == "student" | 
                       job == "retired" | job == "unemployed", "no", "yes")),
-         Above60 = ifelse(age>60, "yes", "no"),
-         ActiveMonths = ifelse(month == "march", "high", 
+         Age_Blocks = ifelse(age>60 | age == 60, "60+", 
+                             ifelse(age < 60 & age > 50, "50-60", 
+                             ifelse(age < 51 & age > 29, "30-50",
+                                    ifelse(age < 30, "0-30", "unknown")))),
+         ActiveMonths = ifelse(month == "mar", "high", 
                       ifelse(month == "nov" | month == "jun" | month == "may", "med", "low")))
+
+
 
 #Show DV for these features
 subsidyRevised %>%
-    dplyr::select(y, Repairs_4800up, Employed, Above60) %>%
+    dplyr::select(y, Employed, Age_Blocks, ActiveMonths) %>%
     gather(Variable, value, -y) %>%
     count(Variable, value, y)%>%
-  mutate(rate = n/lag(n))%>%
-    filter(y=="yes")%>%
+  mutate(rate = lag(n)/n)%>%
+    filter(y=="no")%>%
       ggplot(., aes(value, rate)) +   
         geom_bar(position = "dodge", stat="identity") +
         facet_wrap(~Variable, scales="free") +
         labs(x="Category", y="Percentage of 'Yes' Results",
-             title = "Feature associations with the likelihood of click",
+             title = "Modified Features",
              subtitle = "Categorical features") +
         theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
 
 ```
 
 ## Regression Summary
 
-Show a regression summary for both the kitchen sink and your engineered regression.
+Using these new variables and selecting from a group of those with low p-values and high significance, we split a new data partition and train a revised model. See below that these values have much more focused significance. 
 
-```{r }
+```{r Revised Model, warning = FALSE, message = FALSE}
+
+set.seed(999)
+trainIndexRevised <- createDataPartition(subsidyRevised$y, p = .65,
+                                  list = FALSE,
+                                  times = 1)
+subsidyTrainRev <- subsidyRevised[ trainIndex,]
+subsidyTestRev  <- subsidyRevised[-trainIndex,]
 
 #Make new regression for engineered model
 subsidyModelRev <- glm(y_numeric ~ .,
-                  data=subsidyRevised %>% 
-                    dplyr::select(y_numeric, Repairs_4800up, unemploy_rate, pdays, inflation_rate, campaign, ActiveMonths, poutcome, contact),
+                  data=subsidyTrainRev %>% 
+                    dplyr::select(y_numeric, Repairs_4800up, campaign, ActiveMonths, poutcome, contact, cons.price.idx, cons.conf.idx,unemploy_rate, Age_Blocks, mortgage),
                   family="binomial" (link="logit"))
 
 #Compare new and old models
 summary(subsidyModelRev)
 
-stargazer(subsidyModelRev, type="text")
+```
+
+However, it proved difficult to increase the McFadden R-squared metric. This may be due to blind spots in the data or noise that I haven't removed. No other variables appeared to substantailly increase this value on their own, so I chose to leave this metric and move forward with the forecast knowing that this revised model had similar performance with a more efficient set of variables.
+
+```{r McFadden R-Squared Comparison, warning = FALSE, message = FALSE}
 
 tidy(pR2(subsidyModelRev))%>%
 mutate(Regression = "Engineered")%>%
@@ -277,40 +301,22 @@ rename(McFadden_R2 = x)%>%
   row.names = FALSE,
   align="l")%>%
 kable_styling()
-
-
 ```
+
+
 
 ## CV + Comparison
 
-Cross validate both models; compare and interpret two facetted plots of ROC, Sensitivity and Specificity.
+These cross-validation results below illustrate the same inability to replicate a goodness of fit while using less variables. The sensitivity, or ratio of true positive values to all positive values, was quite similar in results between these two models. The revised model has a worse fit of results to the ROC metric, with more of the predictions skewing toward 1. 
 
-```{r }
-# Predicted Probabilities of Base 
-testProbs <- data.frame(Outcome = as.factor(subsidyTest$y_numeric),
-                        Probs = predict(subsidyModel, subsidyTest, type= "response"))
-
-g(testProbs)
-
-ggplot(testProbs, aes(x = Probs, fill = as.factor(Outcome))) + 
-  geom_density() +
-  facet_grid(Outcome ~ .) +
-  scale_fill_manual(values = palette2) +
-  labs(x = "Click", y = "Density of probabilities",
-       title = "Distribution of predicted probabilities by observed outcome") +
-  theme(strip.text.x = element_text(size = 18),
-        legend.position = "none")
-
-```
-
-```{r Kitchen Sink Model CV }
+```{r Kitchen Sink Model CV, warning = FALSE, message = FALSE}
 
 #ROC, Sensitivity, Specificity
 ctrl <- trainControl(method = "cv", number = 100, classProbs=TRUE, summaryFunction=twoClassSummary)
 
 cvFit <- train(y ~ .,
                   data=subsidy %>% 
-                    dplyr::select(y, spent_on_repairs, unemploy_rate, job, previous), 
+                    dplyr::select(-y_numeric), 
                 method="glm", family="binomial",
                 metric="ROC", trControl = ctrl)
 
@@ -326,27 +332,27 @@ dplyr::select(cvFit$resample, -Resample) %>%
     facet_wrap(~metric) +
     geom_vline(aes(xintercept = mean), colour = "#981FAC", linetype = 3, size = 1.5) +
     scale_x_continuous(limits = c(0, 1)) +
-    labs(x="Goodness of Fit", y="Count", title="CV Goodness of Fit Metrics, Engineered Model",
+    labs(x="Goodness of Fit", y="Count", title="CV Goodness of Fit Metrics, Kitchen Sink Model",
          subtitle = "Across-fold mean reprented as dotted lines")
 
 ```
 
-```{r Revised }
+
+
+```{r Revised Cross Validation, warning = FALSE, message = FALSE}
 
 #ROC, Sensitivity, Specificity
-ctrl <- trainControl(method = "cv", number = 100, classProbs=TRUE, summaryFunction=twoClassSummary)
-
-cvFit <- train(y ~ .,
-                  data=subsidy %>% 
-                    dplyr::select(y, spent_on_repairs, unemploy_rate, job, previous), 
+cvFitRevised <- train(y ~ .,
+                  data=subsidyRevised %>% 
+                    dplyr::select(y, Repairs_4800up, unemploy_rate, campaign, ActiveMonths, poutcome, contact, cons.price.idx, cons.conf.idx, Age_Blocks, mortgage), 
                 method="glm", family="binomial",
                 metric="ROC", trControl = ctrl)
 
-cvFit
+cvFitRevised
 
 
 #Goodness of Fit Metrics
-dplyr::select(cvFit$resample, -Resample) %>%
+dplyr::select(cvFitRevised$resample, -Resample) %>%
   gather(metric, value) %>%
   left_join(gather(cvFit$results[2:4], metric, mean)) %>%
   ggplot(aes(value)) + 
@@ -363,7 +369,10 @@ dplyr::select(cvFit$resample, -Resample) %>%
 
 Output an ROC curve for your new model and interpret it.
 
-```{r }
+```{r ROC Metrics, warning = FALSE, message = FALSE}
+
+testProbs <- data.frame(Outcome = as.factor(subsidyTestRev$y_numeric),
+                        Probs = predict(subsidyModelRev, subsidyTestRev, type= "response"))
 
 testProbs <- 
   testProbs %>%
@@ -376,7 +385,7 @@ auc(testProbs$Outcome, testProbs$Probs)
 
 ```
 
-```{r }
+```{r ROC Curve, warning = FALSE, message = FALSE}
 ggplot(testProbs, aes(d = as.numeric(Outcome), m = Probs)) +
   geom_roc(n.cuts = 50, labels = FALSE, colour = "#FE9900") +
   style_roc(theme = theme_grey) +
@@ -415,7 +424,7 @@ Create the 'Cost/Benefit Table' as seen above.
 
 -\$2850 marketing + 0.25 successes \* (-\$5000 subsidy + ((\$10,000 + \$56,000)\*0.014 annual property tax + ((\$10,000 + \$56,000)\*0.06 home sales \*0.033 real estate transfer tax))\* 10 years).
 
-```{r }
+```{r Cost Benefit Table, warning = FALSE, message = FALSE}
 
 cost_benefit_table <-
    testProbs %>%
@@ -452,7 +461,7 @@ kable(cost_benefit_table,
 
 Plot the confusion metric outcomes for each Threshold.
 
-```{r }
+```{r Thresholds for Each Confusion Metric, warning = FALSE, message = FALSE}
 
 iterateThresholds <- function(data) {
   x = .01
@@ -488,16 +497,6 @@ return(all_prediction)
 
 whichThreshold <- iterateThresholds(testProbs2)
 
-whichThreshold %>%
-  ggplot(.,aes(Threshold, Revenue, colour = Variable)) +
-  geom_point() +
-  scale_colour_manual(values = palette5[c(5, 1:3)]) +    
-  labs(title = "Revenue by confusion matrix type and threshold",
-       y = "Revenue") +
-  plotTheme() +
-  guides(colour=guide_legend(title = "Confusion Matrix")) 
-
-
 #Revenue Confusion Matrix Plot
 revThresholdPlot <- whichThreshold %>%
   ggplot(.,aes(Threshold, Revenue, colour = Variable)) +
@@ -528,7 +527,7 @@ Create two small multiple plots that show Threshold as a function of Total_Reven
 
 The two plots below help us determine which threshold maximizes the city's revenue and which maximizes the total amount of citizens receiving the credit.
 
-```{r }
+```{r Optimal Thresholds , warning = FALSE, message = FALSE}
 
 whichThreshold_revenue <- 
 whichThreshold %>% 
@@ -553,6 +552,7 @@ whichThreshold_counts <-
     summarize(TotalCount = sum(TotalCount))%>%
   round(digits=2)
   
+Optimal_Threshold <- pull(arrange(whichThreshold_counts, -TotalCount)[1,1])
 
 countOptimalPlot <-
     ggplot(whichThreshold_counts)+
@@ -571,12 +571,12 @@ grid.arrange(countOptimalPlot, revOptimalPlot, ncol=2)
 
 Create a table of the Total_Revenue and Total_Count_of_Credits allocated for 2 categories. 50%\_Threshold and your Optimal_Threshold.
 
-```{r }
+```{r 0.50 and Optimal Threshold Measures, warning = FALSE, message = FALSE}
 
 whichThreshold_Summary <-
   whichThreshold_counts %>%
   left_join(whichThreshold_revenue, by="Threshold")%>%
-  filter(Threshold == 0.50 | Threshold == 0.45 | Threshold == 0.80)
+  filter(Threshold == 0.50 | Threshold == Optimal_Threshold)
 
 whichThreshold_Summary%>%
   kable(
